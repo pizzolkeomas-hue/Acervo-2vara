@@ -987,7 +987,7 @@ function startData(){
   const chatSub=(q,which)=>q.onSnapshot(snap=>{ const m={}; snap.docs.forEach(d=>{ m[d.id]=d.data(); }); if(which==="g") chatG=m; else chatD=m; const all_={...chatG,...chatD}; PENDING.chat.forEach((v,id)=>{ if(v) all_[id]=v; }); if(stable(all_)===stable(S.chat)) return; S.chat=all_; renderChat(); renderNavCounts(); },()=>{});
   chatSub(FS.collection("chat").where("conv","==","geral"),"g");
   chatSub(FS.collection("chat").where("part","array-contains",ME.login),"d");
-  FS.doc("base/atual").onSnapshot(d=>{ if(d.exists){ const v=d.data(); if(v&&Array.isArray(v.rows)&&v.rows.length){ if(v.em===BASEINFO.em&&v.arquivo===BASEINFO.arquivo&&v.rows.length===BASE.length) return; BASE=v.rows.map(fromRow); BASEINFO=v; } } else { if(BASEINFO===SEED_INFO) return; BASE=SEED.map(fromRow); BASEINFO=SEED_INFO; } dirty(); renderSoft(); checkEmpty(); },()=>{});
+  FS.doc("base/atual").onSnapshot(d=>{ if(d.exists){ const v=d.data(); let rows=Array.isArray(v.rows)?v.rows:null; if(!rows&&typeof v.rowsJson==="string"){ try{ rows=JSON.parse(v.rowsJson); }catch(e){ rows=null; } } if(rows&&rows.length){ if(v.em===BASEINFO.em&&v.arquivo===BASEINFO.arquivo&&rows.length===BASE.length) return; BASE=rows.map(fromRow); BASEINFO={...v,rows}; } } else { if(BASEINFO===SEED_INFO) return; BASE=SEED.map(fromRow); BASEINFO=SEED_INFO; } dirty(); renderSoft(); checkEmpty(); },()=>{});
   render();
   setTimeout(checkEmpty,2500);
 }
@@ -1007,7 +1007,7 @@ async function diagnostico(){
   catch(e){ add("Leitura no servidor","ERRO "+((e&&e.code)||e)); }
   try{ await FS.doc("config/_diagnostico").set({por:ME?ME.login:"",t:Date.now()},{merge:true}); add("Gravação de teste","OK"); }
   catch(e){ add("Gravação de teste","ERRO "+((e&&e.code)||e)); }
-  try{ const s=await FS.doc("base/atual").get({source:"server"}); add("Planilha no servidor",s.exists?((s.data().rows||[]).length+" processos, arquivo "+(s.data().arquivo||"?")):"NÃO EXISTE (a importação não foi gravada)"); }
+  try{ const s=await FS.doc("base/atual").get({source:"server"}); add("Planilha no servidor",s.exists?(((s.data().total)||(s.data().rows||[]).length||0)+" processos, arquivo "+(s.data().arquivo||"?")+", importada em "+(s.data().em||"?")):"NÃO EXISTE (a importação não foi gravada)"); }
   catch(e){ add("Planilha no servidor","ERRO "+((e&&e.code)||e)); }
   try{ const s=await FS.collection("edicoes").limit(5).get({source:"server"}); add("Leitura de edições",s.size+" documento(s)"); }
   catch(e){ add("Leitura de edições","ERRO "+((e&&e.code)||e)); }
@@ -1943,9 +1943,10 @@ function modalImport(rows,fname){
     <span class="hint">Observações, fases, datas, responsáveis e prioridades são mantidos. Novos sentenciados e baixados sem data recebem a data de hoje.</span>
     <div class="foot"><button type="button" class="btn" data-act="closem">Cancelar</button><button type="button" class="btn primary" id="iGo">Importar</button></div></div>`);
   $("#iGo").onclick=()=>{ if(readOnly){toast("Acesso somente de leitura.");return;}
-    const drop=$("#iDrop").checked, base={rows,arquivo:fname,em:new Date().toISOString()};
+    const drop=$("#iDrop").checked, base={rowsJson:JSON.stringify(rows),total:rows.length,arquivo:fname,em:new Date().toISOString()};
+    base.rows=rows;
     BASE=rows.map(fromRow); BASEINFO=base; dirty(); if(typeof checkEmpty==="function") checkEmpty();
-    if(mode==="db"){ inflight++; wq=wq.then(()=>db.doc("base/atual").set(base)).catch(e=>{ bannerErro("A planilha importada não foi gravada ("+((e&&e.code)||"erro")+")."); }).finally(()=>{ inflight--; if(!inflight) setSave("ok"); }); } else if(!saveLocal({base})) toast("Não foi possível guardar a planilha neste navegador.");
+    if(mode==="db"){ const env={rowsJson:base.rowsJson,total:base.total,arquivo:base.arquivo,em:base.em}; inflight++; wq=wq.then(()=>db.doc("base/atual").set(env)).then(()=>toast("Planilha salva no servidor.")).catch(e=>{ bannerErro("A planilha importada não foi gravada ("+((e&&e.code)||"erro")+")."); }).finally(()=>{ inflight--; if(!inflight) setSave("ok"); }); } else if(!saveLocal({base})) toast("Não foi possível guardar a planilha neste navegador.");
     if(drop) for(const id in S.edicoes){ const e=S.edicoes[id]; if(["s","b","meta","tema"].some(k=>e[k]!==undefined)){ const n={...e}; delete n.s; delete n.b; delete n.meta; delete n.tema; put("edicoes",id,n); } }
     const td=today(), sS=new Set(sent), sB=new Set(baix);
     for(const n of new Set(sent.concat(baix))){ const id=idOf(n), e=S.edicoes[id]||{}, p={}; if(sS.has(n)&&!e.dtS) p.dtS=td; if(sB.has(n)&&!e.dtB) p.dtB=td; if(Object.keys(p).length) put("edicoes",id,{...e,...p,upd:Date.now(),updBy:UI.eu,hist:[{t:Date.now(),k:"import",por:UI.eu,v:`Planilha ${fname}: ${sS.has(n)?"sentenciado":""}${sS.has(n)&&sB.has(n)?" e ":""}${sB.has(n)?"baixado":""}`}].concat(e.hist||[]).slice(0,25)}); }
