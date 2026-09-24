@@ -802,6 +802,8 @@ function merge(b,novo){
 /* ---------- persistence: one serial write queue ---------- */
 let wq=Promise.resolve(), inflight=0;
 function setSave(s,txt){ $("#save").dataset.s=s; $("#saveTxt").textContent=txt||({ok:"Salvo · sincronizado",busy:"Salvando…",local:"Salvo neste navegador",err:"Erro ao salvar"}[s]); }
+let ERRO_DB="";
+function bannerErro(msg){ ERRO_DB=msg; const b=$("#bannerBox"); if(b) b.innerHTML=`<div class="banner" style="background:var(--anom-bg);color:var(--anom)"><b>Os dados não estão sendo salvos no servidor.</b> ${esc(msg)} — clique em <b>Diagnóstico</b> (menu Acessos) e envie o resultado. Enquanto isso, não confie no que aparece aqui.</div>`; }
 function put(coll,id,doc){
   if(doc) S[coll][id]=doc; else delete S[coll][id];
   if(coll==="edicoes"||coll==="novos") dirty();
@@ -812,7 +814,8 @@ function put(coll,id,doc){
   wq=wq.then(run).catch(err=>{
     if(err&&(err.code==="invalid_argument"||err.code==="permission-denied")){ readOnly=true; setSave("err","Somente leitura"); toast("Você tem acesso somente de leitura a este painel."); }
     else if(err&&err.code==="quota_exceeded") toast("Limite de registros do painel atingido.");
-    else toast("Uma alteração não foi salva. Tente de novo.");
+    else if(err&&(err.code==="permission-denied"||err.code==="unavailable")) bannerErro(err.code==="permission-denied"?"As regras do Firestore recusaram a gravação (permission-denied).":"Sem conexão com o banco (unavailable) — a rede pode estar bloqueando firestore.googleapis.com.");
+    else toast("Uma alteração não foi salva ("+((err&&err.code)||"erro")+").");
     throw err;
   }).then(()=>{},()=>{}).finally(()=>{ if(PENDING[coll].get(id)===(doc||null)) PENDING[coll].delete(id); inflight--; if(!inflight&&!readOnly) setSave("ok"); else if(inflight) setSave("busy",inflight>1?`Salvando… (${inflight})`:"Salvando…"); });
 }
@@ -979,7 +982,7 @@ function startData(){
       if(stable(m)===stable(S[coll])) return;
       S[coll]=m; if(coll==="edicoes"||coll==="novos") dirty(); if(coll==="comentarios") indexComs(); if(coll==="autorizados"){ refreshTeam(); dirty(); }
       renderSoft();
-    },err=>{ if(err&&err.code==="permission-denied"){ setSave("err","Sem permissão"); if(coll==="edicoes") toast("Seu login não tem permissão. Peça para ser autorizado na aba Acessos."); } else if(coll==="edicoes") setSave("err","Sincronização interrompida"); }); };
+    },err=>{ if(err&&err.code==="permission-denied"){ setSave("err","Sem permissão"); bannerErro("As regras do Firestore recusaram a leitura de “"+coll+"” (permission-denied)."); } else if(coll==="edicoes") setSave("err","Sincronização interrompida"); }); };
   for(const coll of ["edicoes","novos","filtros","snapshots","importacoes","config","comentarios","autorizados"]) sub(coll,FS.collection(coll));
   const chatSub=(q,which)=>q.onSnapshot(snap=>{ const m={}; snap.docs.forEach(d=>{ m[d.id]=d.data(); }); if(which==="g") chatG=m; else chatD=m; const all_={...chatG,...chatD}; PENDING.chat.forEach((v,id)=>{ if(v) all_[id]=v; }); if(stable(all_)===stable(S.chat)) return; S.chat=all_; renderChat(); renderNavCounts(); },()=>{});
   chatSub(FS.collection("chat").where("conv","==","geral"),"g");
@@ -991,10 +994,35 @@ function startData(){
 function checkEmpty(){ if(!BASE.length&&!Object.keys(S.novos).length) $("#bannerBox").innerHTML='<div class="banner"><b>Nenhuma planilha carregada.</b> Clique em <b>Importar</b> no topo e escolha a exportação do acervo (.xlsx). Os dados ficam guardados só no banco protegido, e não no site.</div>'; else $("#bannerBox").innerHTML=""; }
 function sair(){ if(AUTH) AUTH.signOut().then(()=>location.reload()); }
 
+/* ---------- diagnóstico ---------- */
+async function diagnostico(){
+  const L=[]; const add=(k,v)=>L.push([k,v]);
+  add("Endereço do painel",location.origin+location.pathname);
+  add("Projeto Firebase",(FIREBASE_CONFIG&&FIREBASE_CONFIG.projectId)||"(não configurado)");
+  add("Navegador online",navigator.onLine?"sim":"não");
+  const u=AUTH&&AUTH.currentUser;
+  add("Usuário autenticado",u?u.email:"(ninguém)");
+  add("Login usado",ME?ME.login:"—");
+  try{ const s=await FS.doc("autorizados/"+(ME?ME.login:"x")).get({source:"server"}); add("Leitura no servidor","OK (documento "+(s.exists?"existe":"não existe")+")"); }
+  catch(e){ add("Leitura no servidor","ERRO "+((e&&e.code)||e)); }
+  try{ await FS.doc("config/_diagnostico").set({por:ME?ME.login:"",t:Date.now()},{merge:true}); add("Gravação de teste","OK"); }
+  catch(e){ add("Gravação de teste","ERRO "+((e&&e.code)||e)); }
+  try{ const s=await FS.doc("base/atual").get({source:"server"}); add("Planilha no servidor",s.exists?((s.data().rows||[]).length+" processos, arquivo "+(s.data().arquivo||"?")):"NÃO EXISTE (a importação não foi gravada)"); }
+  catch(e){ add("Planilha no servidor","ERRO "+((e&&e.code)||e)); }
+  try{ const s=await FS.collection("edicoes").limit(5).get({source:"server"}); add("Leitura de edições",s.size+" documento(s)"); }
+  catch(e){ add("Leitura de edições","ERRO "+((e&&e.code)||e)); }
+  add("Erro registrado nesta sessão",ERRO_DB||"nenhum");
+  const txt=L.map(([k,v])=>k+": "+v).join("\n");
+  modal(`<div class="modal" role="dialog" aria-modal="true" aria-label="Diagnóstico"><h3>Diagnóstico da conexão</h3>
+    <textarea class="rep" id="dgTxt" style="min-height:260px" readonly>${esc(txt)}</textarea>
+    <p class="hint" style="margin:0">Copie este texto e envie para quem cuida do painel. “permission-denied” = regras do Firestore; “unavailable” = a rede está bloqueando o banco.</p>
+    <div class="foot"><button type="button" class="btn" data-act="closem">Fechar</button><button type="button" class="btn primary" id="dgCp">Copiar</button></div></div>`);
+  $("#dgCp").onclick=()=>{ const a=$("#dgTxt"); a.select(); try{ document.execCommand("copy"); toast("Copiado."); }catch(e){ toast("Selecione o texto e copie com Ctrl+C."); } };
+}
 /* ---------- aba Acessos ---------- */
 function viewAcessos(){
   const A=Object.values(autorizados()).sort((a,b)=>(b.fundador-a.fundador)||a.login.localeCompare(b.login));
-  return `<div class="card"><div class="card-h"><h2>Logins autorizados</h2><span class="hint">${fmtN(A.length)} com acesso · qualquer pessoa autorizada pode incluir outras</span></div>
+  return `<div class="card"><div class="card-h"><h2>Logins autorizados</h2><button type="button" class="btn" id="bDiag">🩺 Diagnóstico da conexão</button><span class="hint">${fmtN(A.length)} com acesso · qualquer pessoa autorizada pode incluir outras</span></div>
   <div class="scroll"><table><thead><tr><th>Login do TJES</th><th>Nome no painel</th><th>Frente</th><th>Situação</th><th>Autorizado por</th><th></th></tr></thead><tbody>
   ${A.map(a=>`<tr><td class="mono">${esc(a.login)}${a.login===(ME&&ME.login)?' <span class="you">você</span>':""}</td>
     <td><input class="ain" data-anome="${esc(a.login)}" value="${esc(a.nome||"")}" maxlength="30" aria-label="Nome de ${esc(a.login)}"></td>
@@ -1007,6 +1035,7 @@ function viewAcessos(){
   <p class="hint" style="margin:12px 0 0">A pessoa entra com esse login e cria a própria senha em “Primeiro acesso”. Remover um login bloqueia o acesso aos dados na hora. Os quatro logins iniciais são fixos e só podem ser retirados pelas regras do Firebase.</p></div></div>`;
 }
 function acessosEvents(V){
+  V.addEventListener("click",e=>{ if(e.target.closest("#bDiag")) diagnostico(); });
   V.addEventListener("submit",e=>{ if(e.target.id!=="aForm") return; e.preventDefault();
     const login=normLogin($("#aLogin").value), nome=$("#aNome").value.trim().replace(/\s+/g," "), papel=$("#aPapel").value;
     if(!login||!nome){ toast("Preencha login e nome."); return; }
@@ -1916,7 +1945,7 @@ function modalImport(rows,fname){
   $("#iGo").onclick=()=>{ if(readOnly){toast("Acesso somente de leitura.");return;}
     const drop=$("#iDrop").checked, base={rows,arquivo:fname,em:new Date().toISOString()};
     BASE=rows.map(fromRow); BASEINFO=base; dirty(); if(typeof checkEmpty==="function") checkEmpty();
-    if(mode==="db"){ inflight++; wq=wq.then(()=>db.doc("base/atual").set(base)).catch(()=>toast("A nova base não foi salva. Tente importar de novo.")).finally(()=>{ inflight--; if(!inflight) setSave("ok"); }); } else if(!saveLocal({base})) toast("Não foi possível guardar a planilha neste navegador.");
+    if(mode==="db"){ inflight++; wq=wq.then(()=>db.doc("base/atual").set(base)).catch(e=>{ bannerErro("A planilha importada não foi gravada ("+((e&&e.code)||"erro")+")."); }).finally(()=>{ inflight--; if(!inflight) setSave("ok"); }); } else if(!saveLocal({base})) toast("Não foi possível guardar a planilha neste navegador.");
     if(drop) for(const id in S.edicoes){ const e=S.edicoes[id]; if(["s","b","meta","tema"].some(k=>e[k]!==undefined)){ const n={...e}; delete n.s; delete n.b; delete n.meta; delete n.tema; put("edicoes",id,n); } }
     const td=today(), sS=new Set(sent), sB=new Set(baix);
     for(const n of new Set(sent.concat(baix))){ const id=idOf(n), e=S.edicoes[id]||{}, p={}; if(sS.has(n)&&!e.dtS) p.dtS=td; if(sB.has(n)&&!e.dtB) p.dtB=td; if(Object.keys(p).length) put("edicoes",id,{...e,...p,upd:Date.now(),updBy:UI.eu,hist:[{t:Date.now(),k:"import",por:UI.eu,v:`Planilha ${fname}: ${sS.has(n)?"sentenciado":""}${sS.has(n)&&sB.has(n)?" e ":""}${sB.has(n)?"baixado":""}`}].concat(e.hist||[]).slice(0,25)}); }
